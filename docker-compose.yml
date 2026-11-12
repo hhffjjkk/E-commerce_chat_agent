@@ -1,0 +1,25 @@
+services:
+  app:
+    build: .
+    command: ["uvicorn", "agent_system.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+    ports:
+      - "8000:8000"
+    environment:
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.deepseek.com}
+      - LLM_MODEL=${LLM_MODEL:-deepseek-chat}
+      - REDIS_URL=redis://redis:6379/0
+      - API_BASE_URL=${API_BASE_URL:-}
+      - API_TOKEN=${API_TOKEN:-}
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:

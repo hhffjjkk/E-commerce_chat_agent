@@ -1,0 +1,3 @@
+{"input": "查订单 20261101001", "expected_tool": "query_order"}
+{"input": "显示器多少钱", "expected_tool": "query_product"}
+{"input": "单号 SF2000000001 到哪了", "expected_tool": "query_logistics"}
