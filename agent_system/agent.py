@@ -14,16 +14,28 @@ import os
 import re
 import time
 
-from agent_system.errors.exceptions import LLMError, ToolExecutionError
+from agent_system.errors.codes import ErrorCode
+from agent_system.errors.exceptions import AgentError, LLMError, ToolExecutionError
 from agent_system.harness.context_assembler import (
     AssembledContext,
     get_context_assembler,
 )
+from agent_system.harness.loop_controller import (
+    LEGACY_MAX_STEPS,
+    LoopState,
+    LoopTerminationReason,
+    get_loop_controller,
+    termination_reason_for,
+)
+from agent_system.harness.retry_executor import RetryExecutor
+from agent_system.harness.retry_policy import get_retry_policy
 from agent_system.harness.tool_registry import get_registry
 from agent_system.obs.events import log_event
 from agent_system.tools import list_product_keywords
 
 # 系统提示词：定义角色、边界与平台规则（真实 LLM 模式使用）
+# 末尾的“写操作确认规则”为阶段三步骤 4 追加，用于配合服务端两阶段确认；
+# 原有内容逐字保留，未做删改。
 SYSTEM_PROMPT = """你是「XX旗舰店」的智能客服，只回答商品、订单、物流、售后相关问题。
 规则：
 1. 涉及退款、取消订单等敏感操作，先向用户确认订单号无误，得到用户明确确认后再调用工具。
@@ -31,6 +43,12 @@ SYSTEM_PROMPT = """你是「XX旗舰店」的智能客服，只回答商品、�
 3. 不承诺平台之外的优惠或价格。
 4. 回答退换货、发货时间、运费、保修、发票等政策类问题时，先调用 search_faq 工具查询店铺规则，再基于查询结果回答。
 5. 遇到用户投诉、情绪激动、要求人工或问题无法解决时，主动引导转人工客服。
+写操作确认规则：
+- 当 apply_refund 或 cancel_order 工具返回 needs_confirmation=true 时，
+  不要断言操作已完成；请向用户展示 summary 中的内容，并请求用户明确确认。
+- 用户明确确认后，调用 confirm_action(action_id=<上一步返回的 action_id>)。
+- 用户拒绝或改变主意时，调用 reject_action(action_id=...)。
+- 未收到明确确认前，不得再次调用 apply_refund 或 cancel_order 以试图绕过确认。
 """
 
 # 转人工检测：命中敏感词或情绪激动时触发
@@ -215,9 +233,13 @@ class LLMClient:
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         # 最近一次上下文组装结果；供调试/后续 trace 元数据使用，不进入对外响应
         self._last_assembled: AssembledContext | None = None
+        # 最近一次循环状态（LoopState）：供调试与后续 Langfuse metadata 使用
+        self._last_loop: LoopState | None = None
+        # 外部中断探针：默认 None；仅当 LoopPolicy 开启中断检查时才被调用
+        self._interrupt_probe = None
 
     def _call_llm(self, *, stream: bool = False, **kwargs):
-        """调用 `chat.completions.create`，统一完成埋点与异常分类。
+        """调用 `chat.completions.create`，统一完成埋点、异常分类与可选重试。
 
         参数:
             stream: 是否为流式调用；仅在为 True 时向 SDK 传 `stream=True`，
@@ -231,18 +253,33 @@ class LLMClient:
             LLMError: 原始 SDK 异常按超时/状态码分类后的领域异常。
 
         说明:
-            `stream=True` 时 latency_ms 只覆盖“拿到流对象”的耗时，不包含逐块消费，
-            与 phase2-step-1 notes 第 10 节的口径保持一致。
+            - RetryPolicy 启用时对“可重试的 LLM 错误”做指数退避重试；
+              重试耗尽后异常仍抛给上层（由 reply/reply_stream 决定是否降级）。
+            - `llm_call` start/end 只记录一次，不随重试重复计数；
+              重试尝试由 `retry_attempt` 事件记录。
+            - `stream=True` 时 latency_ms 只覆盖“拿到流对象”的耗时，
+              流迭代阶段的失败不在本方法重试。
         """
         model = kwargs.get("model") or getattr(self, "model", None)
         start = time.perf_counter()
         log_event("llm_call", phase="start", model=model, stream=stream)
+        executor = RetryExecutor(get_retry_policy(), target="llm")
+
+        def _once():
+            """单次 SDK 调用，并把原始异常映射为 LLMError。"""
+            try:
+                if stream:
+                    kwargs["stream"] = True
+                return self.client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                # 映射放在重试器内部：RetryExecutor 依据 LLMError.retryable 决策
+                raise _map_llm_exception(exc) from exc
+
         try:
-            if stream:
-                kwargs["stream"] = True
-            result = self.client.chat.completions.create(**kwargs)
+            result = executor.run(_once)
         except Exception as exc:
             # 只记录原始异常类型；分类结果通过 LLMError 交给上层错误体系
+            raw = exc.cause if isinstance(exc, LLMError) and exc.cause is not None else exc
             log_event(
                 "llm_call",
                 phase="end",
@@ -250,9 +287,9 @@ class LLMClient:
                 stream=stream,
                 ok=False,
                 latency_ms=round((time.perf_counter() - start) * 1000, 2),
-                error_type=type(exc).__name__,
+                error_type=type(raw).__name__,
             )
-            raise _map_llm_exception(exc) from exc
+            raise
         log_event(
             "llm_call",
             phase="end",
@@ -322,37 +359,142 @@ class LLMClient:
         self._last_assembled = assembled
         return assembled.messages
 
+    def set_interrupt_probe(self, probe) -> None:
+        """注入外部中断探针（阶段四多 Agent 可传入请求取消检测函数）。
+
+        参数:
+            probe: 无参可调用对象，返回 True 表示应立即中止循环。
+
+        说明:
+            仅在 `LoopPolicy.enable_interrupt_check=True` 时生效；默认关闭，
+            保证现有调用行为不变。
+        """
+        self._interrupt_probe = probe
+
     def _run_tool_loop(self, messages: list) -> list:
-        """执行工具调用循环，返回已包含工具结果的 messages 列表。"""
-        for _ in range(5):  # 最多 5 轮，防止死循环
-            resp = self._call_llm(
-                stream=False,
-                model=self.model,
-                messages=messages,
-                tools=self.TOOLS,
-                tool_choice="auto",
-            )
-            msg = resp.choices[0].message
-            if not msg.tool_calls:
-                return messages  # 模型不再需要工具，准备生成最终回复
-            messages.append(msg)
-            for call in msg.tool_calls:
-                result = self._call_tool(call.function.name, call.function.arguments)
-                messages.append(
-                    {"role": "tool", "tool_call_id": call.id, "content": result}
+        """执行工具调用循环，返回已包含工具结果的 messages 列表。
+
+        本方法已委托 LoopController 承载轮次、工具调用次数、超时与中断检查；
+        默认策略（max_steps=5）下，轮次语义与原 `for _ in range(5)` 等价：
+        最多发起 5 次 LLM 调用，模型不再请求工具时立即返回。
+
+        参数:
+            messages: 初始 messages（来自 ContextAssembler）。
+
+        返回:
+            可能追加了 assistant/tool 消息的 messages 列表。
+
+        异常:
+            AgentError: 循环超时/中断/工具失败，或非默认轮次配置下耗尽步数。
+
+        说明:
+            - `controller.check()` 必须在发起下一次 LLM 调用之前执行，这样
+              `steps >= max_steps` 才精确表示“已用完 N 次调用”；
+            - `state.steps` 在 LLM 调用成功返回后才递增，失败调用不占配额；
+            - 默认 5 轮耗尽时保留原“静默返回已有 messages”的行为，显式调整
+              轮次（如 LOOP_MAX_STEPS=2）则按新错误语义抛 loop_exhausted。
+        """
+        controller = get_loop_controller()
+        state = controller.begin()
+        self._last_loop = state
+        try:
+            while True:
+                # 在调用前检查：轮次/工具次数/超时/中断任一命中都会抛领域异常
+                controller.check(
+                    state,
+                    interrupt_probe=getattr(self, "_interrupt_probe", None),
                 )
-        return messages
+                resp = self._call_llm(
+                    stream=False,
+                    model=self.model,
+                    messages=messages,
+                    tools=self.TOOLS,
+                    tool_choice="auto",
+                )
+                state.steps += 1
+                msg = resp.choices[0].message
+                if not msg.tool_calls:
+                    controller.finish(state, LoopTerminationReason.COMPLETED)
+                    return messages  # 模型不再需要工具，准备生成最终回复
+                messages.append(msg)
+                for call in msg.tool_calls:
+                    controller.record_tool_call(state, tool_name=call.function.name)
+                    result = self._call_tool(call.function.name, call.function.arguments)
+                    messages.append(
+                        {"role": "tool", "tool_call_id": call.id, "content": result}
+                    )
+                controller.log_step(state)
+        except AgentError as exc:
+            # 循环类异常与工具异常都先记录终止原因，再按类型决定是否向上抛
+            reason = termination_reason_for(exc)
+            controller.finish(state, reason)
+            # 兼容重构前的默认行为：5 轮耗尽时静默返回已有 messages，不抛错。
+            # 只有显式调整过 max_steps 的配置才暴露 loop_exhausted 错误。
+            if (
+                exc.code == ErrorCode.LOOP_EXHAUSTED.value
+                and state.policy.max_steps == LEGACY_MAX_STEPS
+            ):
+                return messages
+            raise
+        except Exception:
+            # 非领域异常统一归为 ERROR 终止，保持原有“向上抛”行为
+            controller.finish(state, LoopTerminationReason.ERROR)
+            raise
+
+    @staticmethod
+    def _should_fallback(exc: AgentError) -> bool:
+        """判断异常是否应触发 LLM 降级回复。
+
+        参数:
+            exc: 领域异常。
+
+        返回:
+            True 表示“LLM 重试耗尽 + 总开关开启 + 降级开启”。
+
+        说明:
+            只对 llm_failed 降级；工具失败、循环耗尽、确认失败属于用户需要知道的
+            业务失败，不应用统一话术掩盖。
+        """
+        policy = get_retry_policy()
+        return (
+            exc.code == ErrorCode.LLM_FAILED.value
+            and policy.enabled
+            and policy.fallback_enabled
+        )
 
     def reply(self, message: str, history: list | None = None) -> str:
-        """非流式：返回完整回复。"""
-        messages = self._run_tool_loop(self._build_messages(message, history))
-        resp = self._call_llm(stream=False, model=self.model, messages=messages)
-        return resp.choices[0].message.content or ""
+        """非流式：返回完整回复。
+
+        Retry / Fallback 语义：LLM 重试耗尽且 RETRY_FALLBACK_ENABLED=true 时，
+        返回 fallback_text 而非抛异常；工具失败不降级。
+        """
+        try:
+            messages = self._run_tool_loop(self._build_messages(message, history))
+            resp = self._call_llm(stream=False, model=self.model, messages=messages)
+            return resp.choices[0].message.content or ""
+        except AgentError as exc:
+            if self._should_fallback(exc):
+                log_event("degraded_reply", reason="llm_retry_exhausted", stream=False)
+                return get_retry_policy().fallback_text
+            raise
 
     def reply_stream(self, message: str, history: list | None = None):
-        """流式：逐块产出最终回复文本。"""
-        messages = self._run_tool_loop(self._build_messages(message, history))
-        stream = self._call_llm(stream=True, model=self.model, messages=messages)
+        """流式：逐块产出最终回复文本。
+
+        Retry / Fallback 语义：
+        - 重试只覆盖“流对象创建”阶段；
+        - 首个 chunk 之前失败且启用降级时，yield fallback_text 后正常结束；
+        - 已 yield 过 delta 后的迭代失败不降级，交由流式错误协议处理。
+        """
+        try:
+            messages = self._run_tool_loop(self._build_messages(message, history))
+            stream = self._call_llm(stream=True, model=self.model, messages=messages)
+        except AgentError as exc:
+            if self._should_fallback(exc):
+                log_event("degraded_reply", reason="llm_retry_exhausted", stream=True)
+                yield get_retry_policy().fallback_text
+                return
+            raise
         for chunk in stream:
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content

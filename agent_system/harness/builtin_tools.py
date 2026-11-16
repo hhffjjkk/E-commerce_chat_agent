@@ -7,6 +7,7 @@
 """
 
 from agent_system import tools
+from agent_system.harness import confirmation_tools
 from agent_system.harness.tool_registry import ToolRegistry, ToolSpec, get_registry
 
 # 阶段四预埋：按业务域打标签，供“给某个 Agent 分配工具子集”时过滤使用。
@@ -18,6 +19,8 @@ _TOOL_TAGS: dict[str, tuple[str, ...]] = {
     "search_faq": ("builtin", "faq"),
     "apply_refund": ("builtin", "after_sales"),
     "cancel_order": ("builtin", "after_sales"),
+    "confirm_action": ("builtin", "internal"),
+    "reject_action": ("builtin", "internal"),
 }
 
 
@@ -40,7 +43,10 @@ def register_all(registry: ToolRegistry | None = None) -> None:
     target = registry if registry is not None else get_registry()
 
     for name, schema in tools.TOOL_SCHEMAS.items():
-        func = getattr(tools, name)  # 使用原函数，避免再包一层导致 _tool_guard 执行两次
+        # 前 6 个工具实现在 tools.py；confirm/reject 在 confirmation_tools.py
+        func = getattr(tools, name, None) or getattr(confirmation_tools, name, None)
+        if func is None:
+            raise ValueError(f"内置工具缺少实现: {name}")
         spec = ToolSpec(
             name=name,
             description=schema["description"],

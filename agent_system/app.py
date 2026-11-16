@@ -17,9 +17,14 @@ from pydantic import BaseModel
 from agent_system.agent import LLMClient, MockLLM, detect_escalation
 from agent_system.channels import normalize
 from agent_system.config import get_settings
-from agent_system.errors.fallback import NoOpFallbackHook, register_hook
+from agent_system.errors.fallback import (
+    NoOpFallbackHook,
+    RetryObservingHook,
+    register_hook,
+)
 from agent_system.errors.handlers import register_exception_handlers
 from agent_system.harness.builtin_tools import register_all as register_builtin_tools
+from agent_system.harness.retry_policy import get_retry_policy
 from agent_system.memory import create_store
 from agent_system.obs.events import config_loaded
 from agent_system.obs.langfuse_client import init_langfuse
@@ -58,13 +63,34 @@ config_loaded(
     context_min_keep_recent=settings.context_min_keep_recent,
     context_max_user_chars=settings.context_max_user_chars,
     context_stable_prefix=settings.context_stable_prefix,
+    loop_max_steps=settings.loop_max_steps,
+    loop_max_tool_calls=settings.loop_max_tool_calls,
+    loop_timeout_seconds=settings.loop_timeout_seconds,
+    loop_enable_interrupt_check=settings.loop_enable_interrupt_check,
+    confirmation_ttl_seconds=settings.confirmation_ttl_seconds,
+    confirmation_enabled=settings.confirmation_enabled,
+    confirmation_max_pending_per_session=settings.confirmation_max_pending_per_session,
+    retry_enabled=settings.retry_enabled,
+    retry_max_attempts=settings.retry_max_attempts,
+    retry_initial_backoff_ms=settings.retry_initial_backoff_ms,
+    retry_max_backoff_ms=settings.retry_max_backoff_ms,
+    retry_backoff_multiplier=settings.retry_backoff_multiplier,
+    retry_jitter_ratio=settings.retry_jitter_ratio,
+    retry_llm=settings.retry_llm,
+    retry_tools=settings.retry_tools,
+    retry_fallback_enabled=settings.retry_fallback_enabled,
 )
 
 # 初始化观测层：未配置密钥/鉴权失败都会安全降级为 no-op，不阻塞启动
 init_langfuse(settings)
 
-# 默认兜底钩子：只记录 error_raised，不重试、不降级（阶段三替换实现）
-register_hook(NoOpFallbackHook())
+# 默认兜底钩子：未开启 Retry 时只记录 error_raised；
+# 开启 Retry 时换成观察实现（额外记录 retry_exhausted_observed，不改变异常流向）。
+# 降级回复只在 reply / reply_stream 内部处理，钩子不负责改写响应。
+if get_retry_policy().enabled:
+    register_hook(RetryObservingHook())
+else:
+    register_hook(NoOpFallbackHook())
 
 # 把内置工具装入 Registry：必须在 FastAPI 实例创建前完成，
 # 这样首个请求到达时 LLMClient.TOOLS 已经有 schema 可用（register_all 幂等）。

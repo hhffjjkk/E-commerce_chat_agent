@@ -176,7 +176,7 @@ def test_builtin_register_all_is_idempotent(registry):
     second = registry.snapshot()
 
     assert first == second
-    assert len(second) == 6
+    assert len(second) == 8
     assert all(spec.source == "builtin" for spec in second.values())
 
 
@@ -187,4 +187,4 @@ def test_reset_registry_clears_singleton():
         assert get_registry().snapshot() == {}
     finally:
         register_all()
-    assert len(get_registry().schemas()) == 6
+    assert len(get_registry().schemas()) == 8

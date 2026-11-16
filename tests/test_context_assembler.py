@@ -23,7 +23,7 @@ from agent_system.harness.context_policy import ContextPolicy  # noqa: E402
 
 # SYSTEM_PROMPT 在阶段二/重构期间逐字未变，用哈希锁定防止误改
 EXPECTED_SYSTEM_PROMPT_SHA256 = (
-    "9c1e0c0a9b8c54ae5e7bb5d234d2154e38188f545e8b1c9f0e7b4b06adbc4a85"
+    "647f94fa2e2c85a4ce3528d8e64b145f8ca723082fb205ed5683685f4e52d755"
 )
 
 TOOLS = [

@@ -13,8 +13,14 @@ import json
 import os
 import time
 
+from agent_system.config import get_settings
+from agent_system.errors.codes import ErrorCode
 from agent_system.errors.exceptions import AgentError, DataSourceError, ToolExecutionError
+from agent_system.harness.retry_executor import RetryExecutor
+from agent_system.harness.retry_policy import get_retry_policy
+from agent_system.harness.retry_targets import IDEMPOTENT_READ_TOOLS
 from agent_system.obs.events import log_event
+from agent_system.obs.request_id import get_session_id
 
 # 数据源可能是 httpx（ApiDataSource 未来实现）或 requests（当前骨架），
 # 两者都尝试导入；依赖缺失时降级为空元组，不影响本地 JSON 模式。
@@ -65,33 +71,43 @@ def _tool_guard(name: str):
             start = time.perf_counter()
             ok = True
             error_type = None
+
+            def _invoke():
+                """执行一次工具实现，并把原始异常映射为领域异常。"""
+                try:
+                    return func(*args, **kwargs)
+                except AgentError:
+                    # 已是领域异常：原样抛出，避免重复包装
+                    raise
+                except _DATA_ERRORS as exc:
+                    # 数据文件缺失/结构异常：归为工具执行失败
+                    raise ToolExecutionError(
+                        tool=name,
+                        args_keys=_args_keys(signature, args, kwargs),
+                        cause=exc,
+                    ) from exc
+                except Exception as exc:
+                    # HTTP 类错误来自数据源，单独归为 DataSourceError（可重试）
+                    if _HTTP_ERRORS and isinstance(exc, _HTTP_ERRORS):
+                        raise DataSourceError(tool=name, cause=exc) from exc
+                    raise ToolExecutionError(
+                        tool=name,
+                        args_keys=_args_keys(signature, args, kwargs),
+                        cause=exc,
+                    ) from exc
+
             try:
-                return func(*args, **kwargs)
+                if name in IDEMPOTENT_READ_TOOLS:
+                    # 仅幂等读工具走重试；重试判定由 RetryPolicy 与错误码决定。
+                    # 写操作/确认工具不在白名单，重试可能造成重复副作用。
+                    executor = RetryExecutor(get_retry_policy(), target=f"tool:{name}")
+                    return executor.run(_invoke)
+                return _invoke()
             except AgentError as exc:
-                # 已是领域异常：只补埋点后原样抛出，避免二次包装丢失原始 code
+                # 业务调用最终失败：tool_call 只记录一次，重试尝试由 retry_attempt 记录
                 ok = False
                 error_type = exc.code
                 raise
-            except _DATA_ERRORS as exc:
-                # 数据文件缺失/结构异常：归为工具执行失败
-                ok = False
-                error_type = type(exc).__name__
-                raise ToolExecutionError(
-                    tool=name,
-                    args_keys=_args_keys(signature, args, kwargs),
-                    cause=exc,
-                ) from exc
-            except Exception as exc:
-                ok = False
-                error_type = type(exc).__name__
-                # HTTP 类错误来自数据源，单独归为 DataSourceError（可重试）
-                if _HTTP_ERRORS and isinstance(exc, _HTTP_ERRORS):
-                    raise DataSourceError(tool=name, cause=exc) from exc
-                raise ToolExecutionError(
-                    tool=name,
-                    args_keys=_args_keys(signature, args, kwargs),
-                    cause=exc,
-                ) from exc
             finally:
                 # finally 保证成功/失败都恰好产生一条 tool_call 事件；
                 # error_type 仅在失败时输出，保持与重构前日志字段一致
@@ -118,6 +134,30 @@ def _args_keys(signature, args, kwargs) -> list[str]:
         return sorted(signature.bind_partial(*args, **kwargs).arguments)
     except TypeError:
         return []
+
+
+def map_tool_exception(tool: str, exc: Exception, args_keys) -> AgentError:
+    """把工具实现抛出的异常映射为领域异常。
+
+    参数:
+        tool: 工具名，写入 details。
+        exc: 原始异常。
+        args_keys: 参数名列表（只记键名）。
+
+    返回:
+        AgentError 实例（AgentError 原样返回，其余按类型映射）。
+
+    说明:
+        Guardrails.confirm 在绕过对外工具直接调用 impl 时复用它，
+        保证“确认执行”与“直接执行”的异常语义一致。
+    """
+    if isinstance(exc, AgentError):
+        return exc
+    if isinstance(exc, _DATA_ERRORS):
+        return ToolExecutionError(tool=tool, args_keys=list(args_keys), cause=exc)
+    if _HTTP_ERRORS and isinstance(exc, _HTTP_ERRORS):
+        return DataSourceError(tool=tool, cause=exc)
+    return ToolExecutionError(tool=tool, args_keys=list(args_keys), cause=exc)
 
 
 def _get_source():
@@ -154,14 +194,93 @@ def search_faq(question: str) -> dict:
     return _source.search_faq(question)
 
 
+def _apply_refund_impl(order_id: str, reason: str) -> dict:
+    """退款写操作的真实业务实现。
+
+    说明:
+        不加上 `_tool_guard`：对外工具 apply_refund 负责埋点/异常映射；
+        Guardrails.confirm 直接调用本函数执行，避免二次拦截。
+    """
+    return _source.apply_refund(order_id, reason)
+
+
+def _cancel_order_impl(order_id: str) -> dict:
+    """取消订单写操作的真实业务实现（同上，不经过对外拦截）。"""
+    return _source.cancel_order(order_id)
+
+
 @_tool_guard("apply_refund")
 def apply_refund(order_id: str, reason: str) -> dict:
-    return _source.apply_refund(order_id, reason)
+    """为订单申请退款。
+
+    首次调用只创建服务端待确认记录并返回 `needs_confirmation=True`，不访问数据源；
+    用户明确确认后由 confirm_action → Guardrails.confirm 调用 `_apply_refund_impl` 执行。
+
+    参数:
+        order_id: 订单号。
+        reason: 退款原因。
+
+    返回:
+        待确认结构（needs_confirmation/action_id/summary/expires_in）；
+        CONFIRMATION_ENABLED=false 时返回真实执行结果。
+
+    异常:
+        AgentError: 无会话上下文（confirmation_required）或执行失败。
+    """
+    # 应急开关：关闭两阶段时直接执行，行为与重构前一致
+    if not get_settings().confirmation_enabled:
+        return _apply_refund_impl(order_id, reason)
+
+    session_id = get_session_id()
+    if not session_id:
+        # 没有会话上下文时不静默执行写操作，避免绕过确认
+        raise AgentError(
+            ErrorCode.CONFIRMATION_REQUIRED,
+            details={"tool": "apply_refund"},
+        )
+
+    # 延迟导入：tools 与 guardrails 互相引用，放在函数内避免模块循环
+    from agent_system.harness.guardrails import get_guardrails
+
+    return get_guardrails().intercept_write(
+        "apply_refund",
+        {"order_id": order_id, "reason": reason},
+        session_id,
+    )
 
 
 @_tool_guard("cancel_order")
 def cancel_order(order_id: str) -> dict:
-    return _source.cancel_order(order_id)
+    """取消订单（两阶段确认）。
+
+    首次调用仅创建待确认记录；确认后由 confirm_action 触发 `_cancel_order_impl`。
+
+    参数:
+        order_id: 订单号。
+
+    返回:
+        待确认结构；CONFIRMATION_ENABLED=false 时返回真实执行结果。
+
+    异常:
+        AgentError: 无会话上下文（confirmation_required）或执行失败。
+    """
+    if not get_settings().confirmation_enabled:
+        return _cancel_order_impl(order_id)
+
+    session_id = get_session_id()
+    if not session_id:
+        raise AgentError(
+            ErrorCode.CONFIRMATION_REQUIRED,
+            details={"tool": "cancel_order"},
+        )
+
+    from agent_system.harness.guardrails import get_guardrails
+
+    return get_guardrails().intercept_write(
+        "cancel_order",
+        {"order_id": order_id},
+        session_id,
+    )
 
 
 @_tool_guard("list_product_keywords")
@@ -240,6 +359,33 @@ TOOL_SCHEMAS: dict[str, dict] = {
                 "order_id": {"type": "string", "description": "订单号"}
             },
             "required": ["order_id"],
+        },
+    },
+    # 阶段三步骤 4 新增：确认/拒绝被拦截的写操作（内部工具）
+    "confirm_action": {
+        "description": "确认之前被服务端拦截的写操作并执行。仅在用户明确确认后调用。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action_id": {
+                    "type": "string",
+                    "description": "intercept 阶段返回的 action_id",
+                }
+            },
+            "required": ["action_id"],
+        },
+    },
+    "reject_action": {
+        "description": "拒绝之前被服务端拦截的写操作并作废。用户反悔或拒绝时调用。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action_id": {
+                    "type": "string",
+                    "description": "intercept 阶段返回的 action_id",
+                }
+            },
+            "required": ["action_id"],
         },
     },
 }

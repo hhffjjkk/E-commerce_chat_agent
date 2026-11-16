@@ -38,6 +38,26 @@ def get_session_id() -> str | None:
     return _session_id_var.get() or None
 
 
+def set_session_id(session_id: str):
+    """显式设置当前上下文的 session_id（供 CLI/demo 等非 HTTP 入口使用）。
+
+    参数:
+        session_id: 会话 ID；空值会写成空串（get_session_id 仍返回 None）。
+
+    返回:
+        contextvars.Token，可用 reset_session_id 恢复。
+
+    说明:
+        HTTP 入口由 RequestContextMiddleware 自动从请求体解析并设置，无需调用本函数。
+    """
+    return _session_id_var.set((session_id or "")[:128])
+
+
+def reset_session_id(token) -> None:
+    """恢复 set_session_id 之前的上下文。"""
+    _session_id_var.reset(token)
+
+
 def new_request_id() -> str:
     """生成新的请求 ID：16 位十六进制，足够短便于展示，碰撞概率可忽略。"""
     return uuid.uuid4().hex[:16]

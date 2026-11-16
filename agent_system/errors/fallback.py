@@ -9,7 +9,7 @@
 from typing import Optional, Protocol
 
 from agent_system.errors.exceptions import AgentError
-from agent_system.obs.events import error_raised
+from agent_system.obs.events import error_raised, log_event
 
 
 class FallbackHook(Protocol):
@@ -54,6 +54,48 @@ class NoOpFallbackHook:
             tool=context.get("tool"),
             session_id=context.get("session_id"),
         )
+        return error
+
+
+class RetryObservingHook:
+    """Retry 启用时的观察实现：只记录事件，不改变异常流向。
+
+    与 NoOpFallbackHook 的关系：
+        - 默认关闭 Retry 时仍用 NoOpFallbackHook；
+        - 开启 Retry 后替换为本类，额外记录 `retry_exhausted_observed`，
+          但依旧原样返回 error，绝不把失败伪装成成功。
+
+    为什么叫 observed 而不是 retry_exhausted：
+        executor 内部已经在真正耗尽时记录 `retry_exhausted`；
+        本钩子位于异常出口，无法确认异常一定来自重试耗尽（也可能首次即不可重试），
+        因此用独立事件名避免与执行器重复计数。
+    """
+
+    async def handle(self, error: AgentError, context: dict) -> Optional[AgentError]:
+        """记录 error_raised 与（可重试错误的）retry_exhausted_observed。"""
+        cause = error.cause
+        error_raised(
+            error.code,
+            error.retryable,
+            type(cause).__name__ if cause is not None else None,
+            request_id=context.get("request_id"),
+            path=context.get("path"),
+            tool=context.get("tool"),
+            session_id=context.get("session_id"),
+        )
+
+        # 延迟导入，避免 errors 包在 import 期依赖 harness
+        from agent_system.harness.retry_policy import get_retry_policy
+
+        policy = get_retry_policy()
+        if policy.enabled and error.retryable:
+            log_event(
+                "retry_exhausted_observed",
+                code=error.code,
+                retryable=error.retryable,
+                request_id=context.get("request_id"),
+                path=context.get("path"),
+            )
         return error
 
 

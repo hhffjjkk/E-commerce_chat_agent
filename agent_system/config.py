@@ -97,6 +97,26 @@ class Settings:
     context_min_keep_recent: int
     context_max_user_chars: int
     context_stable_prefix: bool
+    # 工具循环策略（同时由 LoopPolicy.from_env 读取，便于测试注入）
+    loop_max_steps: int
+    loop_max_tool_calls: int
+    loop_timeout_seconds: float
+    loop_enable_interrupt_check: bool
+    # 写操作两阶段确认
+    confirmation_ttl_seconds: int
+    confirmation_enabled: bool
+    confirmation_max_pending_per_session: int
+    # Retry / Fallback（默认关闭，保证既有行为不变）
+    retry_enabled: bool
+    retry_max_attempts: int
+    retry_initial_backoff_ms: int
+    retry_max_backoff_ms: int
+    retry_backoff_multiplier: float
+    retry_jitter_ratio: float
+    retry_llm: bool
+    retry_tools: bool
+    retry_fallback_enabled: bool
+    retry_fallback_text: str
 
 
 @lru_cache(maxsize=1)
@@ -135,4 +155,27 @@ def get_settings() -> Settings:
         context_min_keep_recent=_env_int("CONTEXT_MIN_KEEP_RECENT", 4),
         context_max_user_chars=_env_int("CONTEXT_MAX_USER_CHARS", 4000),
         context_stable_prefix=_env_bool("CONTEXT_STABLE_PREFIX", True),
+        loop_max_steps=_env_int("LOOP_MAX_STEPS", 5),
+        loop_max_tool_calls=_env_int("LOOP_MAX_TOOL_CALLS", 20),
+        loop_timeout_seconds=_env_float("LOOP_TIMEOUT_SECONDS", 120.0),
+        loop_enable_interrupt_check=_env_bool("LOOP_ENABLE_INTERRUPT_CHECK", False),
+        confirmation_ttl_seconds=_env_int("CONFIRMATION_TTL_SECONDS", 300),
+        confirmation_enabled=_env_bool("CONFIRMATION_ENABLED", True),
+        confirmation_max_pending_per_session=_env_int(
+            "CONFIRMATION_MAX_PENDING_PER_SESSION", 5
+        ),
+        retry_enabled=_env_bool("RETRY_ENABLED", False),
+        retry_max_attempts=_env_int("RETRY_MAX_ATTEMPTS", 3),
+        retry_initial_backoff_ms=_env_int("RETRY_INITIAL_BACKOFF_MS", 300),
+        retry_max_backoff_ms=_env_int("RETRY_MAX_BACKOFF_MS", 5000),
+        retry_backoff_multiplier=_env_float(
+            "RETRY_BACKOFF_MULTIPLIER", 2.0, minimum=1.0
+        ),
+        retry_jitter_ratio=_env_float("RETRY_JITTER_RATIO", 0.2, minimum=0.0),
+        retry_llm=_env_bool("RETRY_LLM", True),
+        retry_tools=_env_bool("RETRY_TOOLS", True),
+        retry_fallback_enabled=_env_bool("RETRY_FALLBACK_ENABLED", True),
+        retry_fallback_text=(
+            os.getenv("RETRY_FALLBACK_TEXT", "").strip() or "系统繁忙，请稍后重试。"
+        ),
     )

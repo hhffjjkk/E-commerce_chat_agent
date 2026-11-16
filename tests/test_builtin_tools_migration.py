@@ -23,9 +23,10 @@ from agent_system.app import app  # noqa: E402
 from agent_system.harness.builtin_tools import register_all  # noqa: E402
 from agent_system.harness.tool_registry import get_registry  # noqa: E402
 
-# 迁移前从旧 LLMClient.TOOLS 计算出的快照哈希（sort_keys 后 sha256）。
-# 任何 schema/description/参数改动都会让该值变化，从而被测试拦截。
-EXPECTED_SCHEMA_SHA256 = "4c46bb1ee6695d376e5821bb29ac28c5f8221964cbbaab7a6c1bfbb1eef9344e"
+# 8 条 schema 的完整快照哈希（阶段三步骤 4 追加 confirm_action / reject_action 后）
+EXPECTED_SCHEMA_SHA256 = "c192bb5d8a06a9fc7e0e01640d35d1df631cd51bb9391f65b031d325788fb357"
+# 原 6 条工具的快照哈希：用于证明追加两条后，原有 schema 逐字未变
+LEGACY_SCHEMA_SHA256 = "4c46bb1ee6695d376e5821bb29ac28c5f8221964cbbaab7a6c1bfbb1eef9344e"
 
 EXPECTED_NAMES = [
     "query_product",
@@ -34,6 +35,8 @@ EXPECTED_NAMES = [
     "search_faq",
     "apply_refund",
     "cancel_order",
+    "confirm_action",
+    "reject_action",
 ]
 
 
@@ -70,7 +73,7 @@ def _bad_arguments():
 
 
 def test_tool_schemas_are_migrated_verbatim():
-    """6 个 schema 的排序哈希必须与迁移前快照完全一致。"""
+    """原有 6 条 schema 逐字不变，新增 2 条后整体哈希与名称顺序正确。"""
     register_all()
     schemas = get_registry().schemas()
     payload = json.dumps(schemas, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -78,13 +81,17 @@ def test_tool_schemas_are_migrated_verbatim():
     assert [item["function"]["name"] for item in schemas] == EXPECTED_NAMES
     assert list(tools.TOOL_SCHEMAS) == EXPECTED_NAMES
 
+    # 前 6 条必须与阶段三步骤 1 的快照完全一致
+    legacy = json.dumps(schemas[:6], sort_keys=True, ensure_ascii=False).encode("utf-8")
+    assert hashlib.sha256(legacy).hexdigest() == LEGACY_SCHEMA_SHA256
+
 
 def test_llm_client_tools_matches_registry():
     """LLMClient 实例的 TOOLS 属性应与 Registry 输出一致。"""
     register_all()
     bot = object.__new__(LLMClient)
     assert bot.TOOLS == get_registry().schemas()
-    assert len(bot.TOOLS) == 6
+    assert len(bot.TOOLS) == 8
 
 
 def test_call_tool_returns_json_string():

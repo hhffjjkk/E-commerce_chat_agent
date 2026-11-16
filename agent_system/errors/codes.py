@@ -14,6 +14,14 @@ class ErrorCode(str, Enum):
     DATASOURCE_FAILED = "datasource_failed"
     VALIDATION_ERROR = "validation_error"
     RATE_LIMITED = "rate_limited"
+    # 循环控制相关（阶段三步骤 3）：max_steps / max_tool_calls 用尽、超时、外部中断
+    LOOP_EXHAUSTED = "loop_exhausted"
+    LOOP_TIMEOUT = "loop_timeout"
+    LOOP_INTERRUPTED = "loop_interrupted"
+    # 写操作两阶段确认（阶段三步骤 4）
+    CONFIRMATION_REQUIRED = "confirmation_required"
+    CONFIRMATION_EXPIRED = "confirmation_expired"
+    CONFIRMATION_MISMATCH = "confirmation_mismatch"
 
 
 # 错误码 -> HTTP 状态码
@@ -24,6 +32,12 @@ _HTTP_STATUS = {
     ErrorCode.DATASOURCE_FAILED.value: 502,
     ErrorCode.VALIDATION_ERROR.value: 400,
     ErrorCode.RATE_LIMITED.value: 429,
+    ErrorCode.LOOP_EXHAUSTED.value: 500,
+    ErrorCode.LOOP_TIMEOUT.value: 504,
+    ErrorCode.LOOP_INTERRUPTED.value: 503,
+    ErrorCode.CONFIRMATION_REQUIRED.value: 409,
+    ErrorCode.CONFIRMATION_EXPIRED.value: 410,
+    ErrorCode.CONFIRMATION_MISMATCH.value: 409,
 }
 
 # 错误码 -> 是否默认值得自动重试（阶段三的 Retry 决策依据）
@@ -35,6 +49,16 @@ _RETRYABLE = {
     ErrorCode.DATASOURCE_FAILED.value: True,
     ErrorCode.VALIDATION_ERROR.value: False,
     ErrorCode.RATE_LIMITED.value: True,
+    # 步数/工具次数用尽是确定性的策略上限，重试只会再次命中，故不可重试
+    ErrorCode.LOOP_EXHAUSTED.value: False,
+    # 超时多为上游暂时变慢，可交给阶段三 Retry 决策
+    ErrorCode.LOOP_TIMEOUT.value: True,
+    # 外部中断（如客户端取消）重试没有意义
+    ErrorCode.LOOP_INTERRUPTED.value: False,
+    # 确认类错误都是确定性状态问题，重试需用户重新发起而不是自动重试
+    ErrorCode.CONFIRMATION_REQUIRED.value: False,
+    ErrorCode.CONFIRMATION_EXPIRED.value: False,
+    ErrorCode.CONFIRMATION_MISMATCH.value: False,
 }
 
 # 错误码 -> 面向调用方的中文短消息（不含原始异常文本）
@@ -45,6 +69,12 @@ _MESSAGES = {
     ErrorCode.DATASOURCE_FAILED.value: "数据源访问失败",
     ErrorCode.VALIDATION_ERROR.value: "请求参数非法",
     ErrorCode.RATE_LIMITED.value: "请求过于频繁，请稍后再试",
+    ErrorCode.LOOP_EXHAUSTED.value: "处理步骤已用尽",
+    ErrorCode.LOOP_TIMEOUT.value: "处理超时，请稍后重试",
+    ErrorCode.LOOP_INTERRUPTED.value: "请求已被中断",
+    ErrorCode.CONFIRMATION_REQUIRED.value: "该操作需要用户确认后执行",
+    ErrorCode.CONFIRMATION_EXPIRED.value: "确认已失效，请重新发起操作",
+    ErrorCode.CONFIRMATION_MISMATCH.value: "确认信息不匹配",
 }
 
 # 纯 HTTP 状态（4xx/5xx）-> 中文短消息，用于 http_{status} 兜底码

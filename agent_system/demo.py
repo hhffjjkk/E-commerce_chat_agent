@@ -7,6 +7,7 @@ import os
 from agent_system.agent import LLMClient, MockLLM, detect_escalation
 from agent_system.harness.builtin_tools import register_all
 from agent_system.memory import create_store
+from agent_system.obs.request_id import reset_session_id, set_session_id
 
 # 独立运行 demo 时也要注册内置工具（register_all 幂等，重复导入无副作用）
 register_all()
@@ -23,6 +24,9 @@ def main():
         bot = MockLLM()
 
     store = create_store()
+
+    # CLI 没有 HTTP 中间件，需要显式设置会话上下文，写操作确认才能拿到 session_id
+    session_token = set_session_id("cli")
 
     print("=" * 52)
     print("电商 AI 客服已启动，输入 exit 退出")
@@ -51,6 +55,8 @@ def main():
         print()
         store.append("cli", "user", text)
         store.append("cli", "assistant", full)
+
+    reset_session_id(session_token)
 
 
 if __name__ == "__main__":
