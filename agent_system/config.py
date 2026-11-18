@@ -208,6 +208,11 @@ class Settings:
     router_default_profile: str
     router_llm_enabled: bool
     router_llm_timeout_seconds: float
+    # 阶段六评测：Token 单价（每千 token）与随机种子。
+    # 单价默认 0 表示“不计算成本”，由部署方按实际供应商定价填写。
+    eval_input_price_per_1k_tokens: float
+    eval_output_price_per_1k_tokens: float
+    eval_seed: int
 
 
 @lru_cache(maxsize=1)
@@ -344,6 +349,15 @@ def get_settings() -> Settings:
         router_llm_timeout_seconds=_env_float(
             "ROUTER_LLM_TIMEOUT_SECONDS", 5.0, minimum=0.001
         ),
+        # 评测成本单价：minimum=0 允许“未配置”（0 表示不计算成本）
+        eval_input_price_per_1k_tokens=_env_float(
+            "EVAL_INPUT_PRICE_PER_1K_TOKENS", 0.0, minimum=0.0, invalid=invalid_env
+        ),
+        eval_output_price_per_1k_tokens=_env_float(
+            "EVAL_OUTPUT_PRICE_PER_1K_TOKENS", 0.0, minimum=0.0, invalid=invalid_env
+        ),
+        # 随机种子：记录在报告里，用于复现（Mock 模式任务顺序固定，不依赖种子）
+        eval_seed=_env_int("EVAL_SEED", 42, minimum=0, invalid=invalid_env),
     )
 
     if invalid_env:

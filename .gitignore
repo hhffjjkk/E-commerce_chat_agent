@@ -18,9 +18,18 @@ _*.py
 .pytest_cache/
 .screenshots/
 
+# 评测报告（保留 .gitkeep，报告本身不入库）
+reports/*.json
+reports/*.md
+
+# 简历数字索引是可追溯资产：明确纳入版本控制（报告重跑后需重新生成）
+!docs/resume/metrics-index.json
+!docs/resume/metrics-index.md
+
 # IDE
 .idea/
 .vscode/
+.trae/
 
 # 系统文件
 .DS_Store

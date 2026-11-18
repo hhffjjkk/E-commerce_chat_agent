@@ -127,6 +127,28 @@ def _map_llm_exception(exc: Exception) -> LLMError:
     return LLMError(retryable=retryable, cause=exc)
 
 
+def _usage_tokens(result) -> tuple[int, int]:
+    """从 LLM 响应中读取 prompt / completion token 用量。
+
+    参数:
+        result: `chat.completions.create` 的返回对象（可能是流对象）。
+
+    返回:
+        (prompt_tokens, completion_tokens)；`usage` 缺失、为 None 或字段非法时给 0。
+
+    说明:
+        这是阶段六评测对 Token 计量指标的硬依赖：只有事件里带上用量，
+        collector 才能汇总成本；任何读取失败都必须降级为 0 而不是打断请求。
+    """
+    usage = getattr(result, "usage", None)
+    raw_prompt = getattr(usage, "prompt_tokens", 0) if usage is not None else 0
+    raw_completion = getattr(usage, "completion_tokens", 0) if usage is not None else 0
+    try:
+        return int(raw_prompt or 0), int(raw_completion or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+
+
 class MockLLM:
     """本地规则引擎：模拟「理解意图 -> 调用工具 -> 组织回复」的完整闭环。"""
 
@@ -315,8 +337,12 @@ class LLMClient:
                 ok=False,
                 latency_ms=round((time.perf_counter() - start) * 1000, 2),
                 error_type=type(raw).__name__,
+                # 失败调用没有 usage：显式给 0，保证评测侧字段恒存在
+                prompt_tokens=0,
+                completion_tokens=0,
             )
             raise
+        prompt_tokens, completion_tokens = _usage_tokens(result)
         log_event(
             "llm_call",
             phase="end",
@@ -324,6 +350,9 @@ class LLMClient:
             stream=stream,
             ok=True,
             latency_ms=round((time.perf_counter() - start) * 1000, 2),
+            # 阶段六评测硬依赖：只新增字段，不改变既有字段与事件顺序
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
         return result
 

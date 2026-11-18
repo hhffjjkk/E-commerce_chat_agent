@@ -1,0 +1,15 @@
+{"id": "lp-01", "profile_hint": "pre_sales", "message": "显示器多少钱", "repeat_friendly": true}
+{"id": "lp-02", "profile_hint": "pre_sales", "message": "笔记本多少钱", "repeat_friendly": true}
+{"id": "lp-03", "profile_hint": "pre_sales", "message": "机械键盘有货吗", "repeat_friendly": true}
+{"id": "lp-04", "profile_hint": "pre_sales", "message": "护眼台灯多少钱", "repeat_friendly": true}
+{"id": "lp-05", "profile_hint": "pre_sales", "message": "帮我看看极光笔记本的价格和库存还有没有现货", "repeat_friendly": false}
+{"id": "lp-06", "profile_hint": "pre_sales", "message": "无线鼠标多少钱", "repeat_friendly": true}
+{"id": "lp-07", "profile_hint": "order", "message": "查订单 20261101001", "repeat_friendly": true}
+{"id": "lp-08", "profile_hint": "order", "message": "订单 20261102002 到哪了", "repeat_friendly": true}
+{"id": "lp-09", "profile_hint": "order", "message": "单号 SF2000000001 到哪了", "repeat_friendly": true}
+{"id": "lp-10", "profile_hint": "order", "message": "快递单号 YT2000000003 到哪了", "repeat_friendly": false}
+{"id": "lp-11", "profile_hint": "order", "message": "我的订单到哪了", "repeat_friendly": true}
+{"id": "lp-12", "profile_hint": "order", "message": "订单 20261103001 到哪了", "repeat_friendly": true}
+{"id": "lp-13", "profile_hint": "after_sales", "message": "我要投诉你们", "repeat_friendly": false}
+{"id": "lp-14", "profile_hint": "after_sales", "message": "这个售后怎么处理", "repeat_friendly": false}
+{"id": "lp-15", "profile_hint": "after_sales", "message": "售后太慢了", "repeat_friendly": false}

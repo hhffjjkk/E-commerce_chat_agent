@@ -7,6 +7,111 @@
 # 评分名常量，避免调用方与上报层写错字符串
 TOOL_SUCCESS_RATE = "tool_success_rate"
 ERROR_RATE = "error_rate"
+ROUTE_MATCH = "route_match"
+CONTAINS_KEYWORDS = "contains_keywords"
+NO_WRITE_TOOLS = "no_write_tools"
+CACHE_HIT_EXPECTED = "cache_hit_expected"
+
+
+def _bool_score(name: str, passed: bool) -> dict:
+    """构造统一的布尔型评分字典。
+
+    参数:
+        name: 评分名。
+        passed: 是否通过。
+
+    返回:
+        {"name", "value": 1/0, "data_type": "BOOLEAN"}；阶段六报告按 value 判定。
+    """
+    return {"name": name, "value": 1 if passed else 0, "data_type": "BOOLEAN"}
+
+
+def route_match(actual_agent: str | None, expected_agent: str | None) -> dict | None:
+    """校验实际路由结果是否等于期望 Profile。
+
+    输入:
+        actual_agent: `route_selected.agent`（可能为 None）。
+        expected_agent: `ExpectSpec.route_agent`。
+
+    返回:
+        评分字典；expected_agent 为 None 时返回 None（不适用）。
+
+    说明:
+        只比较 Profile name，不比较 strategy/confidence：
+        同一 Profile 由规则还是 LLM 命中不属于本 evaluator 的职责。
+    """
+    if expected_agent is None:
+        return None
+    return _bool_score(ROUTE_MATCH, actual_agent == expected_agent)
+
+
+def contains_keywords(reply: str | None, keywords) -> dict | None:
+    """校验回复是否包含全部期望关键词。
+
+    输入:
+        reply: 最终 assistant 回复文本（可能为 None）。
+        keywords: ExpectSpec.contains（字符串序列）。
+
+    返回:
+        评分字典；keywords 为空时返回 None（不适用）。
+
+    说明:
+        采用“全部包含”语义：任一关键词缺失即失败；
+        不做大小写或空白归一化，避免评测口径随实现细节漂移。
+    """
+    if not keywords:
+        return None
+    text = reply or ""
+    return _bool_score(CONTAINS_KEYWORDS, all(keyword in text for keyword in keywords))
+
+
+def no_write_tools(
+    tools_used,
+    registry_snapshot: dict | None = None,
+    *,
+    expected: bool = True,
+) -> dict | None:
+    """校验本次任务没有触发任何带 write 标签的工具。
+
+    输入:
+        tools_used: 本次任务调用过的工具名列表。
+        registry_snapshot: 工具名 → ToolSpec 的映射；None 时读取全局 Registry。
+        expected: ExpectSpec.no_write_tools；False 时不适用。
+
+    返回:
+        评分字典；expected=False 时返回 None（不适用）。
+
+    说明:
+        只依据注册表标签判定，不维护第二份写工具名单；
+        未注册的工具名视为非写工具（它本身会在别处触发 tool_failed）。
+    """
+    if not expected:
+        return None
+    if registry_snapshot is None:
+        from agent_system.harness.tool_registry import get_registry
+
+        registry_snapshot = get_registry().snapshot()
+    used = list(tools_used or [])
+    has_write = any(
+        name in registry_snapshot and "write" in registry_snapshot[name].tags
+        for name in used
+    )
+    return _bool_score(NO_WRITE_TOOLS, not has_write)
+
+
+def cache_hit_expected(actual_hit: bool, expected_hit: bool | None) -> dict | None:
+    """校验缓存命中状态是否符合期望。
+
+    输入:
+        actual_hit: 任务内是否出现过 `cache_hit` 事件。
+        expected_hit: ExpectSpec.cache_hit；None 时不适用。
+
+    返回:
+        评分字典；expected_hit 为 None 时返回 None（不适用）。
+    """
+    if expected_hit is None:
+        return None
+    return _bool_score(CACHE_HIT_EXPECTED, bool(actual_hit) == bool(expected_hit))
 
 
 def tool_success_rate(events) -> dict | None:
