@@ -210,12 +210,12 @@ class ToolRegistry:
             for spec in specs
         ]
 
-    def call(self, name: str, **kwargs: Any) -> Any:
+    def call(self, tool_name: str, arguments: dict[str, Any] | None = None) -> Any:
         """执行工具。
 
         参数:
-            name: 工具名。
-            **kwargs: 传给工具实现的参数。
+            tool_name: 已注册的工具名。
+            arguments: 工具入参字典；None 视为无参调用。
 
         返回:
             工具实现的原始返回值（通常是 dict）。
@@ -225,21 +225,33 @@ class ToolRegistry:
 
         说明:
             tool_call 日志由 tools.py 的 `_tool_guard` 负责，这里不再重复埋点。
+
+        设计说明（阶段三遗留 bug 修复）:
+            旧签名是 `call(name, **kwargs)`，当工具入参本身也叫 `name`（例如
+            `query_product(name=...)`）时，Python 会把该关键字参数绑定到 Registry
+            的形参 `name` 上，于是抛出 “got multiple values for argument 'name'”。
+            改为 `(tool_name, arguments)` 后，工具入参只存在于 arguments 字典中，
+            Registry 形参与工具入参名彻底解耦，无论工具参数叫什么都不会冲突；
+            这也与 OpenAI tools API 的 `function.arguments`（JSON → 字典）语义一致，
+            未来做调用审计或参数脱敏时只需在 arguments 层统一拦截。
         """
-        spec = self._tools.get(name)
+        spec = self._tools.get(tool_name)
         if spec is None:
+            # 未注册工具按工具执行失败处理，保持与 _tool_guard 一致的异常口径
             raise ToolExecutionError(
                 "工具未注册",
-                tool=name,
-                args_keys=sorted(kwargs),
+                tool=tool_name,
+                args_keys=sorted(arguments or {}),
             )
         if not spec.enabled:
+            # disabled 与“未注册”区分文案，但同样归为工具执行失败
             raise ToolExecutionError(
                 "工具未启用",
-                tool=name,
-                args_keys=sorted(kwargs),
+                tool=tool_name,
+                args_keys=sorted(arguments or {}),
             )
-        return spec.callable(**kwargs)
+        # arguments 为 None 时按无参调用；8 个内置工具均可用 **arguments 展开
+        return spec.callable(**(arguments or {}))
 
     def snapshot(self) -> dict[str, ToolSpec]:
         """返回注册表的浅拷贝，便于测试与诊断。

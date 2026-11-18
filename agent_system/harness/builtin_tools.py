@@ -17,8 +17,9 @@ _TOOL_TAGS: dict[str, tuple[str, ...]] = {
     "query_order": ("builtin", "order"),
     "query_logistics": ("builtin", "order"),
     "search_faq": ("builtin", "faq"),
-    "apply_refund": ("builtin", "after_sales"),
-    "cancel_order": ("builtin", "after_sales"),
+    # 写操作显式带 write 标签：AgentProfile.allowed_write_tools 依赖该标签做校验
+    "apply_refund": ("builtin", "after_sales", "write"),
+    "cancel_order": ("builtin", "after_sales", "write"),
     "confirm_action": ("builtin", "internal"),
     "reject_action": ("builtin", "internal"),
 }

@@ -5,12 +5,15 @@
 import os
 
 from agent_system.agent import LLMClient, MockLLM, detect_escalation
+from agent_system.harness.builtin_profiles import register_builtin_profiles
 from agent_system.harness.builtin_tools import register_all
+from agent_system.harness.selection import select_profile
 from agent_system.memory import create_store
 from agent_system.obs.request_id import reset_session_id, set_session_id
 
-# 独立运行 demo 时也要注册内置工具（register_all 幂等，重复导入无副作用）
+# 独立运行 demo 时也要注册内置工具与 Profile（幂等，重复导入无副作用）
 register_all()
+register_builtin_profiles()
 
 ESCALATION_TIP = "\n（检测到您可能需要人工协助，可联系在线人工客服进一步处理）"
 
@@ -44,9 +47,12 @@ def main():
             continue
 
         history = store.get("cli")
+        # 与 HTTP 路径复用同一套选择逻辑（含 pending 粘滞）
+        profile, decision, reason = select_profile("cli", text)
+        print(f"[路由] {profile.display_name}（{reason}）")
         print("客服：", end="", flush=True)
         full = ""
-        for chunk in bot.reply_stream(text, history=history):
+        for chunk in bot.reply_stream(text, history=history, profile=profile):
             full += chunk
             print(chunk, end="", flush=True)
         if detect_escalation(text):

@@ -258,5 +258,5 @@ def test_stream_ndjson_structure_unchanged(monkeypatch):
 
     lines = [json.loads(line) for line in response.text.splitlines() if line.strip()]
     event_names = [line.get("event") for line in lines if line.get("event")]
-    assert event_names == ["start", "done"]
+    assert event_names == ["start", "route", "done"]
     assert any("delta" in line for line in lines)

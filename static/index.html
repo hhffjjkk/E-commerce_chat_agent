@@ -1,4 +1,9 @@
 <!DOCTYPE html>
+<!--
+  本文件自「阶段四步骤 4」起增加了子 Agent 路由展示（route 标签、顶部状态栏、调试面板）。
+  原始 vendor 版本保留在 docs/baseline/static-index-original.html。
+  展示逻辑对旧后端完全兼容：响应/流中无 route 信息时不渲染任何新增元素。
+-->
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
@@ -216,6 +221,117 @@
       box-shadow: none;
       cursor: not-allowed;
     }
+
+    /* ---- 路由展示：顶部状态栏 ---- */
+    .route-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 16px;
+      background: #eef3fb;
+      border-bottom: 1px solid #e2e9f3;
+      font-size: 12px;
+      color: #595959; /* 白底浅灰文字保持 WCAG AA 对比度 */
+    }
+    .route-bar[hidden] { display: none; }
+    .route-bar .route-bar-label { color: #6b7280; flex-shrink: 0; }
+    .route-bar .route-bar-value { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .route-bar .route-bar-value.muted { color: #8a94a3; }
+    .route-bar .route-bar-close {
+      border: none;
+      background: transparent;
+      color: #6b7280;
+      font-size: 14px;
+      line-height: 1;
+      cursor: pointer;
+      padding: 2px 4px;
+      border-radius: 6px;
+    }
+    .route-bar .route-bar-close:hover { background: #dde7f5; color: #374151; }
+
+    /* ---- 路由展示：消息级标签（颜色只做辅助，文字表达策略） ---- */
+    .route-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      align-self: flex-start;
+      max-width: 100%;
+      margin-top: 6px;
+      padding: 3px 9px;
+      border: 1px solid #dfe6f0;
+      border-radius: 12px;
+      background: #f4f7fc;
+      color: #4b5563;
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .route-badge .route-meta { color: #595959; }
+    .route-badge .route-error { color: #b45309; }
+    .route-badge[title] { cursor: help; }
+
+    /* ---- 路由调试面板（开发辅助，固定右下角） ---- */
+    .debug-widget {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 30;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 8px;
+    }
+    .debug-toggle {
+      width: 36px;
+      height: 36px;
+      border: 1px solid #d7e0ec;
+      border-radius: 50%;
+      background: #fff;
+      color: #4b5563;
+      font-size: 16px;
+      cursor: pointer;
+      box-shadow: 0 6px 18px rgba(31, 55, 96, 0.16);
+    }
+    .debug-toggle:hover { border-color: var(--primary); color: var(--primary); }
+    .debug-panel {
+      width: min(380px, 82vw);
+      max-height: 300px;
+      overflow: auto;
+      background: #fff;
+      border: 1px solid #dfe6f0;
+      border-radius: 12px;
+      box-shadow: 0 16px 40px rgba(31, 55, 96, 0.2);
+      padding: 10px 12px;
+    }
+    .debug-panel[hidden] { display: none; }
+    .debug-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: #374151;
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+    .debug-header button {
+      border: 1px solid #dfe6f0;
+      background: #f6f8fc;
+      color: #4b5563;
+      border-radius: 8px;
+      font-size: 11px;
+      padding: 3px 8px;
+      cursor: pointer;
+    }
+    .debug-list { display: flex; flex-direction: column; gap: 4px; }
+    .debug-line {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+      color: #4b5563;
+      white-space: nowrap;
+      overflow-x: auto;
+      padding: 2px 0;
+      border-bottom: 1px dashed #eef1f6;
+    }
+    .debug-empty { color: #8a94a3; font-size: 11px; }
   </style>
 </head>
 <body>
@@ -226,6 +342,12 @@
         <div class="name">智能客服</div>
         <div class="status"><span class="dot"></span>在线 · 随时为您服务</div>
       </div>
+    </div>
+
+    <div class="route-bar" id="route-bar" role="status" aria-live="polite">
+      <span class="route-bar-label">当前路由</span>
+      <span class="route-bar-value muted" id="route-bar-value">未路由</span>
+      <button type="button" class="route-bar-close" id="route-bar-close" aria-label="隐藏路由状态栏" title="隐藏路由状态栏">×</button>
     </div>
 
     <div class="chat-messages" id="messages"></div>
@@ -244,6 +366,19 @@
           <path d="M3.4 20.4l17.6-8.4L3.4 3.6l.01 6.5L15 12 3.41 13.9z" fill="#fff"/>
         </svg>
       </button>
+    </div>
+  </div>
+
+  <div class="debug-widget">
+    <button type="button" class="debug-toggle" id="debug-toggle" aria-expanded="false" aria-controls="debug-panel" aria-label="展开或收起路由调试面板" title="路由调试面板">⌃</button>
+    <div class="debug-panel" id="debug-panel" hidden>
+      <div class="debug-header">
+        <span>最近路由（最多 20 条）</span>
+        <button type="button" id="route-bar-restore">显示状态栏</button>
+      </div>
+      <div class="debug-list" id="debug-list">
+        <div class="debug-empty">暂无路由数据</div>
+      </div>
     </div>
   </div>
 
@@ -309,6 +444,241 @@
       if (row && row.parentNode) row.parentNode.removeChild(row);
     }
 
+    /* ==================== 路由展示（阶段四步骤 4） ==================== */
+
+    // 策略中文映射；未知值原样展示，保证后端新增策略时前端仍可观测
+    const STRATEGY_LABELS = {
+      rule: "规则",
+      llm: "LLM",
+      fallback: "兜底",
+      pending_override: "待确认",
+    };
+
+    // 路由原因中文映射；只用于标签的 title tooltip，不塞进正文
+    const REASON_LABELS = {
+      rule_hit: "规则命中",
+      router: "规则命中",
+      llm_hit: "LLM 判定",
+      below_threshold: "低于阈值",
+      no_llm: "LLM 不可用",
+      parse_error: "解析失败",
+      llm_exception: "LLM 异常",
+      router_exception: "路由异常",
+      no_profiles: "无可用子 Agent",
+      profile_missing: "Profile 缺失",
+      invalid_default_profile: "默认 Profile 无效",
+      pending_override: "有未确认操作",
+    };
+
+    const routeBarEl = document.getElementById("route-bar");
+    const routeBarValueEl = document.getElementById("route-bar-value");
+    const routeBarCloseEl = document.getElementById("route-bar-close");
+    const routeBarRestoreEl = document.getElementById("route-bar-restore");
+    const debugToggleEl = document.getElementById("debug-toggle");
+    const debugPanelEl = document.getElementById("debug-panel");
+    const debugListEl = document.getElementById("debug-list");
+
+    const MAX_DEBUG_ROUTES = 20; // 调试面板只保留最近 20 条，避免无限增长
+    let lastRoute = null; // 上一次展示的路由，用于状态栏判断 Profile 是否切换
+    let routeDebugItems = []; // 调试面板队列（原始 JSON）
+
+    /**
+     * 规范化路由对象：字段缺失或类型不符时降级，绝不抛异常。
+     * 参数:
+     *   route - 后端返回的 route 对象（/chat 响应体的 route 或 route 事件本身）。
+     * 返回:
+     *   统一形状 {agent, display_name, strategy, confidence, reason}；
+     *   无任何可展示名称时返回 null（调用方据此不渲染任何新增元素）。
+     */
+    function normalizeRoute(route) {
+      if (!route || typeof route !== "object") return null;
+
+      const agent = typeof route.agent === "string" ? route.agent.trim() : "";
+      const displayName =
+        typeof route.display_name === "string" ? route.display_name.trim() : "";
+      // display_name 为空时降级用 agent 名：显式名称缺失，但子 Agent 标识仍能说明谁在处理，
+      // 避免出现“只有策略没有归属”的空白标签。
+      const display = displayName || agent;
+      if (!display) return null; // 两者都没有 -> 不渲染标签，旧后端静默兼容
+
+      // 置信度只接受有限数字，并夹到 [0,1]，防止后端越界值影响展示
+      let confidence = null;
+      if (typeof route.confidence === "number" && isFinite(route.confidence)) {
+        confidence = Math.min(1, Math.max(0, route.confidence));
+      }
+
+      return {
+        agent: agent || display,
+        display_name: display,
+        strategy: typeof route.strategy === "string" ? route.strategy.trim() : "",
+        confidence: confidence,
+        reason: typeof route.reason === "string" ? route.reason.trim() : "",
+      };
+    }
+
+    /**
+     * 从单条 NDJSON 事件中提取路由信息。
+     * 参数:
+     *   obj - 逐行解析出的 JSON 对象。
+     * 返回:
+     *   规范化后的 route 对象；非 route 事件或无可用信息时返回 null。
+     */
+    function extractRouteFromStream(obj) {
+      if (!obj || obj.event !== "route") return null;
+      return normalizeRoute(obj);
+    }
+
+    /**
+     * 生成消息级路由标签 DOM。
+     * 参数:
+     *   route    - normalizeRoute 的返回值。
+     *   hasError - 本次回复是否伴随错误（流内 error 事件），true 时追加 ⚠。
+     * 返回:
+     *   可直接插入消息 body 的 <span> 元素；route 为空时返回 null。
+     */
+    function renderRouteBadge(route, hasError) {
+      if (!route) return null;
+
+      const badge = document.createElement("span");
+      badge.className = "route-badge";
+
+      // 名称：display_name（已在 normalizeRoute 中降级为 agent 名）
+      const name = document.createElement("span");
+      name.className = "route-name";
+      name.textContent = route.display_name;
+      badge.appendChild(name);
+
+      // 策略与置信度用灰色小字，策略走中文映射；confidence 缺失则只展示策略
+      const metaParts = [];
+      if (route.strategy) metaParts.push(STRATEGY_LABELS[route.strategy] || route.strategy);
+      if (route.confidence !== null) metaParts.push(route.confidence.toFixed(2));
+      if (metaParts.length) {
+        const meta = document.createElement("span");
+        meta.className = "route-meta";
+        meta.textContent = metaParts.join(" · ");
+        badge.appendChild(meta);
+      }
+
+      // 流内出错时仍然展示路由（路由信息有效），只加一个错误图标，详情不进标签
+      if (hasError) {
+        const flag = document.createElement("span");
+        flag.className = "route-error";
+        flag.setAttribute("aria-label", "该次回复出错");
+        flag.textContent = "⚠";
+        badge.appendChild(flag);
+      }
+
+      // 原生 tooltip 展示路由原因的中文解释；无 reason 则不设置 title
+      if (route.reason) {
+        badge.title = REASON_LABELS[route.reason] || route.reason;
+      }
+
+      // 无障碍：用完整句子朗读名称/策略/置信度，confidence 缺失时省略该分句
+      const ariaParts = ["路由：" + route.display_name];
+      if (route.strategy) ariaParts.push("策略：" + (STRATEGY_LABELS[route.strategy] || route.strategy));
+      if (route.confidence !== null) ariaParts.push("置信度：" + route.confidence.toFixed(2));
+      badge.setAttribute("aria-label", ariaParts.join("，"));
+
+      return badge;
+    }
+
+    /**
+     * 更新顶部状态栏为最近一次路由。
+     * 参数:
+     *   route - normalizeRoute 的返回值；null 表示本轮无路由信息。
+     * 说明:
+     *   会话内 Profile 变化时用 “旧 → 新” 展示切换轨迹；
+     *   该函数同时维护 lastRoute，作为下一次比较的基准。
+     */
+    function updateRouteBar(route) {
+      if (!route) {
+        routeBarValueEl.textContent = "未路由";
+        routeBarValueEl.classList.add("muted");
+        routeBarValueEl.removeAttribute("title");
+        return;
+      }
+
+      // 切换过 Profile（例如先 order 后 after_sales）时展示箭头
+      let text = route.display_name;
+      if (lastRoute && lastRoute.agent !== route.agent) {
+        text = lastRoute.display_name + " → " + route.display_name;
+      }
+
+      const metaParts = [];
+      if (route.strategy) metaParts.push(STRATEGY_LABELS[route.strategy] || route.strategy);
+      if (route.confidence !== null) metaParts.push(route.confidence.toFixed(2));
+      if (metaParts.length) text += " · " + metaParts.join(" · ");
+
+      routeBarValueEl.textContent = text;
+      routeBarValueEl.classList.remove("muted");
+      if (route.reason) {
+        routeBarValueEl.title = REASON_LABELS[route.reason] || route.reason;
+      } else {
+        routeBarValueEl.removeAttribute("title");
+      }
+
+      lastRoute = route;
+    }
+
+    /**
+     * 调试面板入队：保留原始 route JSON，便于开发时对照 request_id / ts。
+     * 参数:
+     *   rawRoute - 原始 route 对象或 route 事件（不做字段裁剪）。
+     * 说明:
+     *   仅开发辅助，不是用户功能；生产环境可整体移除该面板。
+     */
+    function pushRouteDebug(rawRoute) {
+      if (!rawRoute) return;
+      routeDebugItems.unshift(rawRoute);
+      if (routeDebugItems.length > MAX_DEBUG_ROUTES) {
+        routeDebugItems.length = MAX_DEBUG_ROUTES;
+      }
+
+      debugListEl.textContent = "";
+      if (!routeDebugItems.length) {
+        const empty = document.createElement("div");
+        empty.className = "debug-empty";
+        empty.textContent = "暂无路由数据";
+        debugListEl.appendChild(empty);
+        return;
+      }
+
+      routeDebugItems.forEach(function (item) {
+        const line = document.createElement("div");
+        line.className = "debug-line";
+        try {
+          line.textContent = JSON.stringify(item); // 单行紧凑展示
+        } catch (e) {
+          line.textContent = String(item);
+        }
+        debugListEl.appendChild(line);
+      });
+    }
+
+    // 调试面板折叠：button + aria-expanded，键盘可直接操作
+    debugToggleEl.addEventListener("click", function () {
+      const expanded = debugToggleEl.getAttribute("aria-expanded") === "true";
+      debugToggleEl.setAttribute("aria-expanded", String(!expanded));
+      debugPanelEl.hidden = expanded;
+      debugToggleEl.textContent = expanded ? "⌃" : "⌄";
+    });
+
+    // 展示偏好是纯前端状态：写入后端会引入无谓的配置项与迁移成本，因此用 localStorage。
+    // 默认展示（true）；关闭只影响顶部状态栏，不影响消息级标签。
+    if (localStorage.getItem("show_route_bar") === "0") {
+      routeBarEl.hidden = true;
+    }
+    routeBarCloseEl.addEventListener("click", function () {
+      routeBarEl.hidden = true;
+      localStorage.setItem("show_route_bar", "0");
+    });
+    routeBarRestoreEl.addEventListener("click", function () {
+      routeBarEl.hidden = false;
+      localStorage.setItem("show_route_bar", "1");
+    });
+
+    /* ==================== 消息发送与路由渲染 ==================== */
+
     async function send(text) {
       const message = (text !== undefined ? text : inputEl.value.trim());
       if (!message || sendBtn.disabled) return;
@@ -318,51 +688,99 @@
 
       let bubble = null;
       let typingRow = addTyping();
+      // 本轮的 route 信息先在流内记录，等消息结束后再统一渲染，
+      // 避免“标签先出现、正文为空”的视觉抖动，也避免流中途失败留下孤立标签。
+      let currentRoute = null;
+      let streamErrored = false; // 流内 error 事件标记，仅决定标签是否追加 ⚠
+      // 可选的非流式验证入口：访问 ?mode=chat 时走 /chat，便于对照两处 route 数据来源
+      const nonStreamMode = new URLSearchParams(location.search).get("mode") === "chat";
 
       try {
-        const resp = await fetch("/chat/stream", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id: sessionId, message: message }),
-        });
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          let idx;
-          while ((idx = buffer.indexOf("\n")) >= 0) {
-            const line = buffer.slice(0, idx).trim();
-            buffer = buffer.slice(idx + 1);
-            if (!line) continue;
-            try {
-              const obj = JSON.parse(line);
-              if (obj.delta) {
-                if (!bubble) {
-                  removeTyping(typingRow);
-                  typingRow = null;
-                  bubble = addMessage("assistant", "");
-                }
-                bubble.textContent += obj.delta;
-                messagesEl.scrollTop = messagesEl.scrollHeight;
-              }
-            } catch (e) {
-              /* 忽略无法解析的行 */
-            }
-          }
-        }
-        if (!bubble) {
+        if (nonStreamMode) {
+          // ---------- /chat：响应体直接携带 route ----------
+          const resp = await fetch("/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sessionId, message: message }),
+          });
+          const data = await resp.json();
           removeTyping(typingRow);
           typingRow = null;
-          addMessage("assistant", "（未收到回复，请稍后再试）");
+          bubble = addMessage("assistant", data.reply || "（未收到回复，请稍后再试）");
+          currentRoute = normalizeRoute(data.route);
+          if (data.route) pushRouteDebug(data.route);
+        } else {
+          // ---------- /chat/stream：route 来自 NDJSON 的 route 事件 ----------
+          const resp = await fetch("/chat/stream", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sessionId, message: message }),
+          });
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let idx;
+            while ((idx = buffer.indexOf("\n")) >= 0) {
+              const line = buffer.slice(0, idx).trim();
+              buffer = buffer.slice(idx + 1);
+              if (!line) continue;
+              try {
+                const obj = JSON.parse(line);
+                // 先尝试提取 route：只记录，不立即渲染
+                const routeEvent = extractRouteFromStream(obj);
+                if (routeEvent) {
+                  currentRoute = routeEvent;
+                  pushRouteDebug(obj);
+                } else if (obj.event === "error") {
+                  streamErrored = true;
+                }
+                if (obj.delta) {
+                  if (!bubble) {
+                    removeTyping(typingRow);
+                    typingRow = null;
+                    bubble = addMessage("assistant", "");
+                  }
+                  bubble.textContent += obj.delta;
+                  messagesEl.scrollTop = messagesEl.scrollHeight;
+                }
+              } catch (e) {
+                /* 忽略无法解析的行 */
+              }
+            }
+          }
+          if (!bubble) {
+            removeTyping(typingRow);
+            typingRow = null;
+            // 出错时仍要保留 assistant 消息承载路由标签，因此这里把返回的 bubble 记录下来
+            bubble = addMessage("assistant", "（未收到回复，请稍后再试）");
+          }
         }
+
+        // 消息结束后统一追加标签：无 route 时完全不渲染，DOM 与改动前一致
+        if (currentRoute && bubble) {
+          const badge = renderRouteBadge(currentRoute, streamErrored);
+          const bodyEl = bubble.parentNode;
+          const timeEl = bodyEl ? bodyEl.querySelector(".time") : null;
+          if (bodyEl) bodyEl.insertBefore(badge, timeEl);
+        }
+        updateRouteBar(currentRoute);
       } catch (err) {
         removeTyping(typingRow);
         typingRow = null;
-        if (!bubble) addMessage("assistant", "（网络错误，请确认服务已启动）");
+        if (!bubble) bubble = addMessage("assistant", "（网络错误，请确认服务已启动）");
         else bubble.textContent += "\n（连接中断）";
+        // 连接中断不影响已有路由信息的展示
+        if (currentRoute) {
+          const badge = renderRouteBadge(currentRoute, true);
+          const bodyEl = bubble.parentNode;
+          const timeEl = bodyEl ? bodyEl.querySelector(".time") : null;
+          if (bodyEl) bodyEl.insertBefore(badge, timeEl);
+        }
+        updateRouteBar(currentRoute);
       } finally {
         sendBtn.disabled = false;
         inputEl.focus();

@@ -176,16 +176,25 @@ class StreamEmitter:
         agent: str,
         confidence: float | None = None,
         reason: str | None = None,
+        *,
+        display_name: str | None = None,
+        strategy: str | None = None,
     ) -> dict:
-        """发射路由结果事件（阶段四填充真实数据，本步骤只保证格式）。
+        """发射路由结果事件。
 
         参数:
             agent: 命中的 Agent 名称。
             confidence: 路由置信度，可为空。
-            reason: 路由原因，可为空。
+            reason: 路由原因标签，可为空。
+            display_name: 子 Agent 中文展示名（可选字段，阶段四接入新增）。
+            strategy: 路由策略（rule / llm / fallback / pending_override，可选字段）。
 
         返回:
             route 事件字典。
+
+        说明:
+            新增的 display_name / strategy 均为可选字段，不改变既有必填字段，
+            旧前端忽略它们即可。
         """
         self._ensure_open()
         payload = self._base("route")
@@ -194,10 +203,16 @@ class StreamEmitter:
             payload["confidence"] = confidence
         if reason is not None:
             payload["reason"] = reason
+        if display_name is not None:
+            payload["display_name"] = display_name
+        if strategy is not None:
+            payload["strategy"] = strategy
         # done 事件只回填摘要，不重复完整业务数据
         summary = {"agent": agent}
         if confidence is not None:
             summary["confidence"] = confidence
+        if strategy is not None:
+            summary["strategy"] = strategy
         self._collected["route"] = summary
         return payload
 
@@ -264,15 +279,15 @@ class StreamEmitter:
     def emit_cache(
         self,
         hit: bool,
-        layer: Literal["session", "semantic"],
+        layer: Literal["session", "semantic", "nmsg"],
         key_prefix: str | None = None,
     ) -> dict:
         """发射缓存命中事件（阶段五填充真实数据）。
 
         参数:
             hit: 是否命中缓存。
-            layer: 缓存层，session 或 semantic。
-            key_prefix: 缓存键前缀，可为空。
+            layer: 缓存层，session / semantic / nmsg（归一化消息缓存）。
+            key_prefix: 缓存键前缀，可为空；协议层默认不传，避免泄露隔离维度。
 
         返回:
             cache 事件字典。

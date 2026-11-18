@@ -19,38 +19,28 @@ def _request_id(request: Request) -> str:
 def check_redis(settings) -> dict:
     """Redis 连通性检查；未配置视为不检查，不影响就绪。
 
-    返回 {"ok": bool, "detail": str}；detail 只给简短原因（pong/timeout/unreachable），
-    不包含连接串，避免泄露地址与凭据。
+    返回:
+        {"ok": bool, "detail": str}；detail 只给简短原因码
+        （pong / not_configured / timeout / connect_error / ping_failed），
+        不包含连接串，避免泄露地址与凭据。
+
+    说明:
+        - 复用 RedisManager 的连接池，不再每次探针新建客户端并关闭；
+        - 使用 ping(force=True)：健康检查要求实时性，不接受 5 秒 PING 缓存窗口，
+          否则 Redis 刚挂掉时 /health/ready 可能仍然报 ok；
+        - 响应结构保持不变（checks.redis.ok / detail），仅内部实现调整。
     """
     if not settings.redis_url:
         return {"ok": True, "detail": "not_configured"}
-    try:
-        import redis
-    except ImportError:  # pragma: no cover - 依赖缺失的极端环境
-        return {"ok": False, "detail": "redis package missing"}
 
-    client = None
-    try:
-        # 1 秒超时：健康检查本身不能变成慢请求
-        client = redis.from_url(
-            settings.redis_url,
-            socket_connect_timeout=1,
-            socket_timeout=1,
-            decode_responses=True,
-        )
-        client.ping()
+    # 延迟导入：health 模块在应用初始化早期被导入，避免 cache -> config 的循环风险
+    from agent_system.cache import get_redis_manager
+
+    manager = get_redis_manager()
+    if manager.ping(force=True):
         return {"ok": True, "detail": "pong"}
-    except Exception as exc:  # noqa: BLE001 - 健康检查需要吞掉所有异常
-        if isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower():
-            return {"ok": False, "detail": "timeout"}
-        return {"ok": False, "detail": "unreachable"}
-    finally:
-        # 无论成功失败都关闭连接，避免每次探针都泄漏一个客户端
-        if client is not None:
-            try:
-                client.close()
-            except Exception:  # noqa: BLE001
-                pass
+    # 失败原因由 Manager 归类（timeout / connect_error / ping_failed），只记录原因码
+    return {"ok": False, "detail": manager.last_error or "ping_failed"}
 
 
 def check_data_dir() -> dict:

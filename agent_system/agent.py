@@ -16,6 +16,8 @@ import time
 
 from agent_system.errors.codes import ErrorCode
 from agent_system.errors.exceptions import AgentError, LLMError, ToolExecutionError
+from agent_system.harness.agent_profile import AgentProfile
+from agent_system.harness.builtin_profiles import compose_system_prompt
 from agent_system.harness.context_assembler import (
     AssembledContext,
     get_context_assembler,
@@ -135,7 +137,19 @@ class MockLLM:
             return int(n)
         return n
 
-    def reply(self, message: str, history: list | None = None) -> str:
+    def reply(
+        self,
+        message: str,
+        history: list | None = None,
+        *,
+        profile: AgentProfile | None = None,
+    ) -> str:
+        """Mock 回复。
+
+        参数:
+            profile: 仅为与 LLMClient 接口对齐；Mock 是规则驱动，与业务域无关，
+                因此**忽略**该参数，路由信息只用于外层 route 事件。
+        """
         # Mock 后端基于关键词规则，暂不使用历史上下文
         msg = message.strip()
         # 与真实 LLM 路径保持一致：工具统一经 Registry 分发，
@@ -145,19 +159,23 @@ class MockLLM:
         # 1. 优先识别快递单号（物流查询），支持顺丰/圆通/中通/韵达/申通/京东
         tracking_match = re.search(r"(?:SF|YT|ZT|YD|STO|JD)\d{8,}", msg)
         if tracking_match:
-            data = registry.call("query_logistics", tracking_no=tracking_match.group())
+            # 显式传 arguments 字典：避免工具入参与 Registry 形参同名冲突
+            data = registry.call(
+                "query_logistics", arguments={"tracking_no": tracking_match.group()}
+            )
             return self._format_logistics(data)
 
         # 2. 识别 11 位订单号（订单查询）
         order_match = re.search(r"\d{11}", msg)
         if order_match:
-            data = registry.call("query_order", order_id=order_match.group())
+            data = registry.call("query_order", arguments={"order_id": order_match.group()})
             return self._format_order(data)
 
         # 3. 商品咨询（按导入数据里的商品名/关键词命中）
         for key in list_product_keywords():
             if key in msg:
-                data = registry.call("query_product", name=key)
+                # 本次修复的关键路径：name 只作为字典键，不再与 Registry 形参冲突
+                data = registry.call("query_product", arguments={"name": key})
                 return self._format_product(data)
 
         # 4. 兜底回复
@@ -168,8 +186,14 @@ class MockLLM:
             "· 物流：单号 SF123456789 到哪了"
         )
 
-    def reply_stream(self, message: str, history: list | None = None):
-        """Mock 后端不支持真正的流式，直接一次性返回完整回复。"""
+    def reply_stream(
+        self,
+        message: str,
+        history: list | None = None,
+        *,
+        profile: AgentProfile | None = None,
+    ):
+        """Mock 流式回复：忽略 profile，直接一次性返回完整回复。"""
         yield self.reply(message, history)
 
     def _format_product(self, data: dict) -> str:
@@ -237,6 +261,9 @@ class LLMClient:
         self._last_loop: LoopState | None = None
         # 外部中断探针：默认 None；仅当 LoopPolicy 开启中断检查时才被调用
         self._interrupt_probe = None
+        # 本次请求调用过的工具名（只记名字，不记参数与结果）；
+        # app 层据此判断是否触及写/内部工具，从而决定是否写回消息缓存。
+        self._last_used_tools: list[str] = []
 
     def _call_llm(self, *, stream: bool = False, **kwargs):
         """调用 `chat.completions.create`，统一完成埋点、异常分类与可选重试。
@@ -315,7 +342,9 @@ class LLMClient:
 
         说明:
             - arguments 原文不会进入异常消息，避免把模型输出或敏感值带进响应；
-            - tool_call 埋点仍由 tools.py 的 `_tool_guard` 统一负责，这里不重复记录。
+            - tool_call 埋点仍由 tools.py 的 `_tool_guard` 统一负责，这里不重复记录；
+            - 本处是阶段三遗留 bug 的修复点：改为显式传 arguments 字典，
+              不再把工具入参展开到 **kwargs，避免与 Registry 形参同名冲突。
         """
         try:
             args = json.loads(arguments) if arguments else {}
@@ -330,10 +359,69 @@ class LLMClient:
                 args_keys=[],
                 cause=TypeError("tool arguments must be a JSON object"),
             )
-        result = get_registry().call(name, **args)
+        # 记录本次请求用过的工具名（仅名字）：写操作/内部工具会阻止消息缓存写回。
+        # 该列表在 reply / reply_stream 入口清空，避免跨请求污染。
+        # 防御性初始化：测试可能用 object.__new__ 绕过 __init__。
+        if not hasattr(self, "_last_used_tools"):
+            self._last_used_tools = []
+        self._last_used_tools.append(name)
+        # 显式传字典：工具入参名（如 name / order_id）不再与 Registry 形参冲突
+        result = get_registry().call(name, arguments=args)
         return json.dumps(result, ensure_ascii=False)
 
-    def _build_messages(self, message: str, history: list | None) -> list:
+    def _reset_used_tools(self) -> None:
+        """清空本次请求的工具调用记录。
+
+        在 reply / reply_stream 入口调用，避免跨请求污染；
+        不放进 _build_messages，因为 Mock 路径与缓存命中路径都不走该方法。
+        """
+        self._last_used_tools = []
+
+    def schemas_for(self, profile: AgentProfile) -> list[dict]:
+        """返回该 Profile 允许的工具 schema 子集。
+
+        参数:
+            profile: 子 Agent Profile。
+
+        返回:
+            过滤掉未注册/已禁用工具后的 schema 列表；若过滤后为空则回退全量。
+
+        说明:
+            ToolRegistry.schemas(names=...) 遇到缺失名称会抛 ValueError；
+            Profile 是设计期配置、Registry 是运行期状态，设计期配置不应阻塞请求，
+            因此这里先过滤并记录 `profile_tool_missing`，再生成 schema。
+            但绝不静默跳过：缺失项必须可观测。
+        """
+        registry = get_registry()
+        available: list[str] = []
+        missing: list[str] = []
+        for name in profile.tool_names:
+            spec = registry.get(name)
+            if spec is None or not spec.enabled:
+                missing.append(name)
+            else:
+                available.append(name)
+
+        if missing:
+            log_event(
+                "profile_tool_missing",
+                profile=profile.name,
+                missing=missing,
+                fallback_to_all=not available,
+            )
+
+        if not available:
+            # 极端情况：Profile 的工具全部不可用；返回全量，至少让请求能继续
+            return self.TOOLS
+        return registry.schemas(names=available)
+
+    def _build_messages(
+        self,
+        message: str,
+        history: list | None,
+        *,
+        profile: AgentProfile | None = None,
+    ) -> list:
         """构造发送给 LLM 的 messages。
 
         本方法已委托给 ContextAssembler，负责：
@@ -345,15 +433,28 @@ class LLMClient:
         参数:
             message: 当前用户输入。
             history: 存储层返回的历史消息，可为空。
+            profile: 可选子 Agent；None 时保持旧行为（SYSTEM_PROMPT + 全量工具）。
 
         返回:
             组装后的 messages 列表。
+
+        说明:
+            profile 非 None 时使用 compose_system_prompt(profile)，使 stable_prefix_hash
+            按 Profile 隔离，为阶段五语义缓存按 profile 分桶打基础。
         """
+        if profile is None:
+            # 向后兼容路径：Mock 与既有测试不需要构造 Profile
+            system_prompt = SYSTEM_PROMPT
+            tools_schemas = self.TOOLS
+        else:
+            system_prompt = compose_system_prompt(profile)
+            tools_schemas = self.schemas_for(profile)
+
         assembled = get_context_assembler().assemble(
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             history=history or [],
             user_message=message,
-            tools_schemas=get_registry().schemas(),
+            tools_schemas=tools_schemas,
         )
         # 缓存最近一次组装结果，便于调试；不改变 AssembledContext 的字段语义
         self._last_assembled = assembled
@@ -371,7 +472,12 @@ class LLMClient:
         """
         self._interrupt_probe = probe
 
-    def _run_tool_loop(self, messages: list) -> list:
+    def _run_tool_loop(
+        self,
+        messages: list,
+        *,
+        profile: AgentProfile | None = None,
+    ) -> list:
         """执行工具调用循环，返回已包含工具结果的 messages 列表。
 
         本方法已委托 LoopController 承载轮次、工具调用次数、超时与中断检查；
@@ -380,6 +486,8 @@ class LLMClient:
 
         参数:
             messages: 初始 messages（来自 ContextAssembler）。
+            profile: 可选子 Agent；None 时下发全量工具（向后兼容），
+                非 None 时只下发 `profile.tool_names` 子集（最小权限）。
 
         返回:
             可能追加了 assistant/tool 消息的 messages 列表。
@@ -392,8 +500,10 @@ class LLMClient:
               `steps >= max_steps` 才精确表示“已用完 N 次调用”；
             - `state.steps` 在 LLM 调用成功返回后才递增，失败调用不占配额；
             - 默认 5 轮耗尽时保留原“静默返回已有 messages”的行为，显式调整
-              轮次（如 LOOP_MAX_STEPS=2）则按新错误语义抛 loop_exhausted。
+              轮次（如 LOOP_MAX_STEPS=2）则按新错误语义抛 loop_exhausted；
+            - 工具子集只影响 LLM 可见的 schema，不改变循环上限与异常语义。
         """
+        tools = self.schemas_for(profile) if profile is not None else self.TOOLS
         controller = get_loop_controller()
         state = controller.begin()
         self._last_loop = state
@@ -408,7 +518,7 @@ class LLMClient:
                     stream=False,
                     model=self.model,
                     messages=messages,
-                    tools=self.TOOLS,
+                    tools=tools,
                     tool_choice="auto",
                 )
                 state.steps += 1
@@ -462,14 +572,28 @@ class LLMClient:
             and policy.fallback_enabled
         )
 
-    def reply(self, message: str, history: list | None = None) -> str:
+    def reply(
+        self,
+        message: str,
+        history: list | None = None,
+        *,
+        profile: AgentProfile | None = None,
+    ) -> str:
         """非流式：返回完整回复。
 
         Retry / Fallback 语义：LLM 重试耗尽且 RETRY_FALLBACK_ENABLED=true 时，
         返回 fallback_text 而非抛异常；工具失败不降级。
+
+        参数:
+            profile: 可选子 Agent；None 时保持旧行为（全量规则与工具）。
         """
+        # 每次请求入口清空工具记录，供 app 层判断是否允许写回消息缓存
+        self._reset_used_tools()
         try:
-            messages = self._run_tool_loop(self._build_messages(message, history))
+            messages = self._run_tool_loop(
+                self._build_messages(message, history, profile=profile),
+                profile=profile,
+            )
             resp = self._call_llm(stream=False, model=self.model, messages=messages)
             return resp.choices[0].message.content or ""
         except AgentError as exc:
@@ -478,16 +602,30 @@ class LLMClient:
                 return get_retry_policy().fallback_text
             raise
 
-    def reply_stream(self, message: str, history: list | None = None):
+    def reply_stream(
+        self,
+        message: str,
+        history: list | None = None,
+        *,
+        profile: AgentProfile | None = None,
+    ):
         """流式：逐块产出最终回复文本。
 
         Retry / Fallback 语义：
         - 重试只覆盖“流对象创建”阶段；
         - 首个 chunk 之前失败且启用降级时，yield fallback_text 后正常结束；
         - 已 yield 过 delta 后的迭代失败不降级，交由流式错误协议处理。
+
+        参数:
+            profile: 可选子 Agent；None 时保持旧行为（全量规则与工具）。
         """
+        # 每次请求入口清空工具记录（流式路径同样需要，避免跨请求污染）
+        self._reset_used_tools()
         try:
-            messages = self._run_tool_loop(self._build_messages(message, history))
+            messages = self._run_tool_loop(
+                self._build_messages(message, history, profile=profile),
+                profile=profile,
+            )
             stream = self._call_llm(stream=True, model=self.model, messages=messages)
         except AgentError as exc:
             if self._should_fallback(exc):

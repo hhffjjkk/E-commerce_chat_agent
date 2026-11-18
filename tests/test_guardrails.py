@@ -135,7 +135,8 @@ def test_confirm_expired(events, impl_calls):
     """超过 TTL 后 confirm 返回 confirmation_expired（410）。"""
     guardrails = _guardrails()
     action_id = guardrails.intercept_write("apply_refund", ARGS, "s1")["action_id"]
-    guardrails.store.get(action_id).expires_at = time.monotonic() - 1
+    # pending 时间戳是墙钟，过期注入也必须用墙钟
+    guardrails.store.get(action_id).expires_at = time.time() - 1
 
     with pytest.raises(AgentError) as exc_info:
         guardrails.confirm(action_id, "s1")

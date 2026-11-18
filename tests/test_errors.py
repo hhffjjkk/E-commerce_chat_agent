@@ -121,21 +121,21 @@ class _FakeBot(LLMClient):
         self.model = "fake-model"
 
     # 跳过真实工具循环，直接让 reply 走到最终 create 调用
-    def _run_tool_loop(self, messages):
+    def _run_tool_loop(self, messages, *, profile=None):
         """原样返回 messages，避免触发工具循环的额外 create 调用。"""
         return messages
 
-    def _build_messages(self, message, history):
+    def _build_messages(self, message, history, *, profile=None):
         """构造最小消息列表，避免依赖真实系统提示词。"""
         return [{"role": "user", "content": message}]
 
-    def reply(self, message, history=None):
+    def reply(self, message, history=None, *, profile=None):
         """非流式回复：复用真实 LLMClient 的 _call_llm（含埋点与异常映射）。"""
-        return LLMClient.reply(self, message, history)
+        return LLMClient.reply(self, message, history, profile=profile)
 
-    def reply_stream(self, message, history=None):
+    def reply_stream(self, message, history=None, *, profile=None):
         """流式回复：内容相同，仅用于满足接口形状。"""
-        yield self.reply(message, history)
+        yield self.reply(message, history, profile=profile)
 
 
 class _StatusError(Exception):

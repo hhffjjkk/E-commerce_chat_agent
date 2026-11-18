@@ -226,7 +226,7 @@ def test_stream_failure_after_delta_is_not_degraded(monkeypatch):
     """已 yield delta 后的异常不降级，仍走 error + done(failed)。"""
 
     class FailingBot:
-        def reply_stream(self, message, history=None):
+        def reply_stream(self, message, history=None, *, profile=None):
             yield "部分内容"
             raise AgentError(ErrorCode.LLM_FAILED, cause=TimeoutError("late"))
 

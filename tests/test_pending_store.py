@@ -21,7 +21,8 @@ from agent_system.harness.pending_store import (  # noqa: E402
 
 def _pending(action_id="a1", session_id="s1", *, expires_in=60.0) -> PendingAction:
     """构造一条 pending 记录。"""
-    now = time.monotonic()
+    # pending 时间戳使用墙钟；测试也使用 time.time() 保持语义一致
+    now = time.time()
     return PendingAction(
         action_id=action_id,
         session_id=session_id,
@@ -75,7 +76,8 @@ def test_purge_expired_only_touches_pending():
     store.create(expired)
     store.create(alive)
 
-    assert store.purge_expired(now=time.monotonic() + 1) == 1
+    # 默认容差 5 秒：推进 6 秒确保越过容差窗口
+    assert store.purge_expired(now=time.time() + 6) == 1
     assert store.get("a1").status == "expired"
     assert store.get("a2").status == "pending"
 

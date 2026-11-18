@@ -33,8 +33,16 @@ _EVENT_SCHEMA: dict[str, dict] = {
     },
     StreamEventType.ROUTE.value: {
         "required": ["event", "request_id", "ts", "seq"],
-        "optional": ["agent", "confidence", "reason", "trace_id", "span_id"],
-        "compatibility": "阶段四填充，本步骤只定义结构",
+        "optional": [
+            "agent",
+            "confidence",
+            "reason",
+            "display_name",
+            "strategy",
+            "trace_id",
+            "span_id",
+        ],
+        "compatibility": "阶段四步骤 3 起实际发射；display_name/strategy 为新增可选字段",
     },
     StreamEventType.TOOL_CALL.value: {
         "required": ["event", "request_id", "ts", "seq"],
@@ -56,7 +64,7 @@ _EVENT_SCHEMA: dict[str, dict] = {
     StreamEventType.CACHE.value: {
         "required": ["event", "request_id", "ts", "seq"],
         "optional": ["hit", "layer", "key_prefix", "trace_id", "span_id"],
-        "compatibility": "阶段五填充，layer 取 session / semantic",
+        "compatibility": "阶段五填充，layer 取 session / semantic / nmsg",
     },
     StreamEventType.ERROR.value: {
         "required": ["event", "request_id", "ts", "seq", "code", "message", "retryable"],

@@ -26,12 +26,12 @@ from agent_system.errors.exceptions import AgentError  # noqa: E402
 class _FailingBot:
     """模拟 LLM 在产出首个 delta 后失败的场景。"""
 
-    def reply_stream(self, message, history=None):
+    def reply_stream(self, message, history=None, *, profile=None):
         """先产出一段文本，再抛出 LLMError，触发流内 error 分支。"""
         yield "部分内容"
         raise AgentError(ErrorCode.LLM_FAILED, cause=TimeoutError("upstream timeout"))
 
-    def reply(self, message, history=None):
+    def reply(self, message, history=None, *, profile=None):
         """非流式路径在本测试中不使用。"""
         raise AssertionError("reply 不应被调用")
 

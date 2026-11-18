@@ -78,13 +78,14 @@ def test_disable_and_enable_affect_schemas_and_call(registry):
 
     assert registry.schemas() == []
     with pytest.raises(ToolExecutionError) as exc_info:
-        registry.call("demo_tool", value="x")
+        # 调用形式改为显式 arguments 字典（断言内容不变）
+        registry.call("demo_tool", arguments={"value": "x"})
     assert exc_info.value.code == "tool_failed"
     assert exc_info.value.details["tool"] == "demo_tool"
 
     registry.enable("demo_tool")
     assert [item["function"]["name"] for item in registry.schemas()] == ["demo_tool"]
-    assert registry.call("demo_tool", value="x") == {"ok": "x"}
+    assert registry.call("demo_tool", arguments={"value": "x"}) == {"ok": "x"}
 
 
 def test_enable_and_disable_missing_tool_raise_keyerror(registry):
